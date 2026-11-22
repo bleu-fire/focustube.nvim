@@ -1,0 +1,102 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{parskip}
+
+\geometry{margin=1in}
+
+\title{FocusTube.nvim: Architecture and Systems Design of an Intentional Video Learning Environment in Neovim}
+\author{FocusTube.nvim}
+\date{2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+FocusTube.nvim is a native Neovim plugin designed to eliminate algorithmic distractions during technical video study. By separating video curation from playback, the system replaces web-based video interfaces with a local SQLite library, asynchronous metadata extraction via \texttt{yt-dlp} and Deno, and an external \texttt{mpv} player controlled over a local Unix domain socket. This document details the architecture, persistence model, IPC protocol, progress recovery semantics, and Focus Mode state machine.
+\end{abstract}
+
+\section{Problem Statement and Design Philosophy}
+Web video platforms optimize for watch time through recommendation feeds, autoplay queues, and short-form content. For learners---particularly those managing Attention-Deficit/Hyperactivity Disorder (ADHD)---these interface elements induce continuous context switching. FocusTube.nvim enforces five constraints:
+\begin{enumerate}
+  \item \textbf{Zero Browser Surface}: No embedded web views, recommendation sidebars, or short-form feeds.
+  \item \textbf{Local-First State}: Library entries, playback positions, bookmarks, notes, and focus sessions reside in a local SQLite database.
+  \item \textbf{Explicit Approval}: Playback is restricted strictly to videos registered in the local library.
+  \item \textbf{Crash Resilience}: Playback positions flush periodically, on pause events, and on editor exit.
+  \item \textbf{Minimalist Interface}: Floating Neovim windows expose only controls relevant to the active study task.
+\end{enumerate}
+
+\section{System Architecture and Module Boundaries}
+The plugin is partitioned into four layers under \texttt{lua/focustube/}:
+\begin{itemize}
+  \item \textbf{Entry and Command Layer} (\texttt{init.lua}, \texttt{config.lua}, \texttt{commands.lua}): Handles configuration merging, database initialization, user commands, keymaps, and \texttt{VimLeavePre} cleanup.
+  \item \textbf{Core Domain Layer} (\texttt{core/}): Implements persistence (\texttt{database.lua}), library curation (\texttt{library.lua}), IPC (\texttt{ipc.lua}), process lifecycle (\texttt{player.lua}), progress tracking (\texttt{progress.lua}), bookmarks (\texttt{bookmarks.lua}), notes (\texttt{notes.lua}), and Focus Mode (\texttt{focus.lua}).
+  \item \textbf{Presentation Layer} (\texttt{ui/}): Renders floating buffers for the dashboard, library, single-video workspace, bookmarks, and Markdown note editor.
+  \item \textbf{Utility Layer} (\texttt{utils/}): Provides time formatting, JSON decoding, XDG path resolution, and subprocess execution.
+\end{itemize}
+
+\section{URL Validation and Metadata Extraction}
+Before network activity occurs, \texttt{utils/system.lua} validates URLs via \texttt{parse\_youtube\_url}. It requires a valid YouTube host (\texttt{youtube.com}, \texttt{youtu.be}, or \texttt{youtube-nocookie.com}), blocks \texttt{/shorts/} paths, and extracts the video identifier into canonical form.
+
+Metadata extraction in \texttt{core/library.lua} executes asynchronously using \texttt{vim.system}:
+\begin{verbatim}
+yt-dlp --dump-json --no-playlist --no-warnings --skip-download --js-runtimes deno <url>
+\end{verbatim}
+Using Deno as the JavaScript runtime allows \texttt{yt-dlp} to resolve extraction challenges without Python or Node.js dependencies in the plugin runtime.
+
+\section{Local Persistence and Schema Design}
+State is persisted in \texttt{<stdpath("data")>/focustube/focustube.db} via \texttt{core/database.lua}, which invokes \texttt{sqlite3} in batch JSON mode (\texttt{-batch -json}) with WAL journaling, a 5000 ms busy timeout, and foreign key enforcement.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Table} & \textbf{Purpose} \\
+\midrule
+\texttt{videos} & Approved video metadata, category, watch-later flag, position, completion \\
+\texttt{bookmarks} & Timestamped chapter markers linked by \texttt{video\_id} (\texttt{ON DELETE CASCADE}) \\
+\texttt{notes} & Markdown learning notes with optional \texttt{timestamp\_sec} \\
+\texttt{focus\_sessions} & Recorded Focus Mode start/end timestamps and elapsed duration \\
+\bottomrule
+\end{tabular}
+\caption{SQLite relational tables in FocusTube.nvim.}
+\end{table}
+
+Positional \texttt{?} parameters are bound through \texttt{database.quote}, escaping single quotes and serializing booleans, numbers, and nulls safely.
+
+\section{External Playback and Unix Domain Socket IPC}
+\texttt{core/player.lua} spawns \texttt{mpv} using \texttt{vim.system} with an explicit argument array and a per-session Unix domain socket under \texttt{\$XDG\_RUNTIME\_DIR/focustube/}:
+\begin{verbatim}
+mpv-<pid>-<hrtime>.sock
+\end{verbatim}
+No TCP ports are opened. \texttt{core/ipc.lua} connects via \texttt{vim.uv.new\_pipe(false)} using a bounded retry loop, observes \texttt{time-pos}, \texttt{duration}, \texttt{pause}, and \texttt{eof-reached}, and correlates newline-delimited JSON responses by \texttt{request\_id}. On exit, temporary sockets are unlinked via \texttt{vim.uv.fs\_unlink}.
+
+\section{Crash-Resilient Progress Tracking}
+\texttt{core/progress.lua} flushes playback position on four triggers:
+\begin{enumerate}
+  \item A periodic \texttt{vim.uv} timer (\texttt{save\_interval\_ms}, default 5000 ms).
+  \item Immediate flush when \texttt{mpv} reports \texttt{pause = true}.
+  \item End-of-file or process termination.
+  \item Neovim's \texttt{VimLeavePre} autocmd.
+\end{enumerate}
+When \texttt{position\_sec / duration\_sec >= 0.90}, the video is marked completed. \texttt{get\_resume\_position} returns \texttt{0} for completed videos or positions within 5 seconds of the end.
+
+\section{Timestamp Bookmarks}
+\texttt{core/bookmarks.lua} captures the active playback timestamp from \texttt{player.get\_state()} and stores custom labels indexed by \texttt{(video\_id, timestamp\_sec)}. Selecting a bookmark in \texttt{ui/bookmarks.lua} issues an absolute \texttt{seek} command over IPC if the video is playing, or launches \texttt{mpv} at that timestamp.
+
+\section{Markdown Learning Notes}
+\texttt{core/notes.lua} and \texttt{ui/notes.lua} manage per-video Markdown notes with optional timestamps. Editing opens a floating buffer configured with \texttt{buftype=acwrite} and \texttt{filetype=markdown}; a \texttt{BufWriteCmd} autocmd persists buffer contents to SQLite on \texttt{:w} or \texttt{<C-s>}. Notes can be exported into a unified Markdown document via \texttt{notes.to\_markdown}.
+
+\section{Focus Mode State Machine}
+\texttt{core/focus.lua} locks the session to a single approved \texttt{video\_id} and records the session in \texttt{focus\_sessions}. While active, \texttt{can\_browse()} blocks access to library and watch-later views, \texttt{can\_switch\_video()} rejects playback of other videos, and \texttt{ui/dashboard.lua} hides all browsing controls.
+
+\section{Verification and Deployment}
+The headless test suite (\texttt{nvim --headless -u NONE -l tests/run.lua}) verifies time utilities, URL validation, SQLite CRUD, progress completion, bookmarks, notes, Focus Mode guards, user commands, and live Unix domain socket IPC roundtrips against an in-process \texttt{vim.uv.new\_pipe} server. The plugin integrates with \texttt{lazy.nvim} and exposes \texttt{:FocusTubeHealth} to verify \texttt{mpv}, \texttt{yt-dlp}, \texttt{deno}, and \texttt{sqlite3}.
+
+\end{document}

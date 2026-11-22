@@ -1,0 +1,70 @@
+*focustube.txt*  ADHD-friendly YouTube learning workflow for Neovim
+
+==============================================================================
+CONTENTS                                                   *focustube-contents*
+
+  1. Introduction .......................... |focustube-intro|
+  2. Installation .......................... |focustube-install|
+  3. Commands .............................. |focustube-commands|
+  4. Focus Mode ............................ |focustube-focus|
+  5. Keymaps ............................... |focustube-keymaps|
+
+==============================================================================
+1. INTRODUCTION                                               *focustube-intro*
+
+FocusTube.nvim is a distraction-minimized YouTube learning workflow inside
+Neovim. It manages an approved local video library in SQLite, extracts
+metadata with `yt-dlp` (and `deno`), and plays videos in `mpv` over a local
+Unix domain socket using JSON IPC.
+
+==============================================================================
+2. INSTALLATION                                             *focustube-install*
+
+Using lazy.nvim: >lua
+  {
+    "focustube/focustube.nvim",
+    opts = {},
+  }
+<
+
+Requirements:
+- Neovim >= 0.10.0
+- mpv
+- yt-dlp
+- deno
+- sqlite3
+
+==============================================================================
+3. COMMANDS                                                *focustube-commands*
+
+:FocusTube                  Open the FocusTube Dashboard.
+:FocusTubeLibrary           Open the approved video library.
+:FocusTubeAdd [url]         Validate and add a YouTube URL via yt-dlp.
+:FocusTubePause             Toggle pause/resume in mpv.
+:FocusTubeStop              Stop mpv and flush playback progress.
+:FocusTubeSeek {sec}        Seek relative seconds (e.g. +10 or -10).
+:FocusTubeBookmark [title]  Capture a timestamp bookmark for active video.
+:FocusTubeNote              Create a Markdown note for the active video.
+:FocusTubeFocus             Toggle Focus Mode.
+:FocusTubeHealth            Verify mpv, yt-dlp, deno, and sqlite3.
+
+==============================================================================
+4. FOCUS MODE                                                 *focustube-focus*
+
+Focus Mode locks FocusTube to a single selected library video, hides library
+browsing and watch-later queues, and prevents accidental video switching
+until you explicitly exit Focus Mode.
+
+==============================================================================
+5. KEYMAPS                                                  *focustube-keymaps*
+
+Default global keymaps (when `keymaps.enable_default = true`):
+  <leader>ftd   Open Dashboard
+  <leader>ftl   Open Library
+  <leader>fta   Add YouTube URL
+  <leader>ftp   Toggle Pause/Resume
+  <leader>ftb   Add Bookmark
+  <leader>ftn   New Learning Note
+  <leader>ftf   Toggle Focus Mode
+
+vim:tw=78:ts=8:ft=help:norl:

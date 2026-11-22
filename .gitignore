@@ -1,0 +1,6 @@
+*.db
+*.db-wal
+*.db-shm
+*.sock
+.DS_Store
+doc/tags
